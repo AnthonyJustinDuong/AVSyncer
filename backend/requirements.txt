@@ -1,0 +1,12 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+python-multipart==0.0.9
+numpy==1.26.4
+scipy==1.13.0
+faster-whisper==1.0.3
+openai>=1.40.0
+python-dotenv>=1.0.0
+requests>=2.31.0
+aiofiles==23.2.1
+pydantic==2.7.0
+sse-starlette==2.1.3

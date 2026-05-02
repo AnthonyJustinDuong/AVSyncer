@@ -1,0 +1,79 @@
+.playback-controls {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.playback-controls.disabled {
+  opacity: 0.5;
+}
+
+.keeps-only-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.playback-controls.disabled .keeps-only-toggle {
+  cursor: not-allowed;
+}
+
+.keeps-only-toggle input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.keeps-only-track {
+  position: relative;
+  width: 34px;
+  height: 18px;
+  background: var(--border);
+  border-radius: 999px;
+  transition: background 0.15s;
+  flex-shrink: 0;
+}
+
+.keeps-only-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  transition: transform 0.15s, background 0.15s;
+}
+
+.keeps-only-toggle input:checked + .keeps-only-track {
+  background: rgba(34, 197, 94, 0.4);
+}
+
+.keeps-only-toggle input:checked + .keeps-only-track .keeps-only-thumb {
+  transform: translateX(16px);
+  background: var(--keep);
+}
+
+.keeps-only-toggle input:focus-visible + .keeps-only-track {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.keeps-only-label {
+  line-height: 18px;
+}
+
+.playback-controls-hint {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-left: 44px;
+}

@@ -1,0 +1,39 @@
+# OS
+.DS_Store
+
+# Secrets & local environment (never commit real keys)
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+frontend/dist/
+
+# Frontend tooling caches
+frontend/.vite/
+*.tsbuildinfo
+
+# Local tool / IDE logs (e.g. gstack)
+.gstack/
+
+# Backend uploads / generated media
+backend/uploads/
+
+# Keys & certs (if ever added locally)
+*.pem
+id_rsa
+id_ed25519
+*.p12
