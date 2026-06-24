@@ -27,10 +27,14 @@ def _write_session_json(session_id: str) -> None:
         return
     info = {
         "session_id": session_id,
+        "kind": data.get("kind", "sync"),
         "created_at": data.get("created_at"),
         "sync": data.get("sync"),
         "analysis": data.get("analysis"),
         "words": data.get("words"),
+        "caption_project": data.get("caption_project"),
+        "caption_words": data.get("caption_words"),
+        "caption_video_filename": data.get("caption_video_filename"),
     }
     with open(_session_json_path(session_id), "w") as f:
         json.dump(info, f)
@@ -52,17 +56,35 @@ def load_sessions_from_disk() -> None:
                 info = json.load(f)
         except (OSError, json.JSONDecodeError):
             continue
+        sync = info.get("sync") or {}
+        analysis = info.get("analysis")
+        caption_project = info.get("caption_project")
+        caption_video_filename = info.get("caption_video_filename")
+
+        if caption_project and caption_video_filename:
+            caption_path = os.path.join(session_dir, caption_video_filename)
+            if os.path.exists(caption_path):
+                sessions[entry] = {
+                    "kind": "caption",
+                    "caption_path": caption_path,
+                    "caption_video_filename": caption_video_filename,
+                    "duration": caption_project.get("duration"),
+                    "created_at": info.get("created_at"),
+                    "caption_project": caption_project,
+                    "caption_words": info.get("caption_words"),
+                }
+                continue
+
         synced_path = os.path.join(session_dir, "synced.mp4")
         if not os.path.exists(synced_path):
             continue
-        sync = info.get("sync") or {}
-        analysis = info.get("analysis")
         if analysis and not isinstance(analysis.get("partitions"), list):
             # Pre-partition analyses (phrase-level "segments") are incompatible
             # with the new full-partitioning schema; drop them so the user
             # re-runs /analyze. Word-level transcripts below are still reused.
             analysis = None
         sessions[entry] = {
+            "kind": "sync",
             "synced_path": synced_path,
             "duration": sync.get("duration"),
             "created_at": info.get("created_at"),
@@ -114,6 +136,7 @@ async def sync_files(
     )
 
     sessions[session_id] = {
+        "kind": "sync",
         "video_path": video_path,
         "audio_path": audio_path,
         "synced_path": synced_path,

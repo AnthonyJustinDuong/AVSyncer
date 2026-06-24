@@ -9,7 +9,7 @@ import re
 from dotenv import load_dotenv
 load_dotenv()
 
-from routers import sync, analysis, export
+from routers import sync, analysis, export, captions
 
 
 @asynccontextmanager
@@ -111,6 +111,7 @@ def serve_session_file(session_id: str, filename: str, request: Request):
 app.include_router(sync.router, prefix="/api")
 app.include_router(analysis.router, prefix="/api")
 app.include_router(export.router, prefix="/api")
+app.include_router(captions.router, prefix="/api")
 
 
 @app.get("/api/health")

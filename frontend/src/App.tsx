@@ -1,11 +1,30 @@
 import { useEffect, useRef, useState } from 'react';
-import type { AppStage, SyncResult, AnalysisResult, Partition, SessionInfo } from './types/project';
-import { syncFiles, analyzeAudio, exportVideo, listSessions } from './services/apiClient';
+import type {
+  AppStage,
+  SyncResult,
+  AnalysisResult,
+  Partition,
+  SessionInfo,
+  CaptionProject,
+} from './types/project';
+import {
+  syncFiles,
+  analyzeAudio,
+  exportVideo,
+  listSessions,
+  uploadCaptionVideo,
+  transcribeCaptionVideo,
+  saveCaptionProject,
+  exportCaptionVideo,
+  listCaptionSessions,
+} from './services/apiClient';
 import FileUpload from './components/FileUpload/FileUpload';
+import CaptionUpload from './components/FileUpload/CaptionUpload';
 import Timeline from './components/Timeline/Timeline';
 import VideoPreview from './components/VideoPreview/VideoPreview';
 import PlaybackControls from './components/VideoPreview/PlaybackControls';
 import ExportPanel from './components/ExportPanel/ExportPanel';
+import CaptionEditor from './components/CaptionEditor/CaptionEditor';
 import { useKeepsOnlyPlayback } from './hooks/useKeepsOnlyPlayback';
 import './index.css';
 
@@ -44,14 +63,18 @@ function keepPartitions(partitions: Partition[]): Partition[] {
   return partitions.filter((p) => p.keep && p.text.trim().length > 0);
 }
 
+type WorkflowMode = 'sync' | 'captions';
+
 export default function App() {
   const persisted = loadPersisted();
   const [stage, setStage] = useState<AppStage>(persisted?.stage ?? 'idle');
+  const [workflow, setWorkflow] = useState<WorkflowMode>(persisted ? 'sync' : 'captions');
   const [error, setError] = useState<string | null>(null);
   const [syncResult, setSyncResult] = useState<SyncResult | null>(persisted?.syncResult ?? null);
   const [analysis, setAnalysis] = useState<AnalysisResult | null>(persisted?.analysis ?? null);
   const [partitions, setPartitions] = useState<Partition[]>(persisted?.partitions ?? []);
   const [downloadUrl, setDownloadUrl] = useState<string | null>(persisted?.downloadUrl ?? null);
+  const [captionProject, setCaptionProject] = useState<CaptionProject | null>(null);
   const [, setCurrentTime] = useState(0);
   const [videoEl, setVideoEl] = useState<HTMLVideoElement | null>(null);
   const [keepsOnly, setKeepsOnly] = useState<boolean>(persisted?.keepsOnly ?? false);
@@ -106,6 +129,8 @@ export default function App() {
 
   async function handleFilesSelected(video: File, audio: File) {
     setError(null);
+    setWorkflow('sync');
+    setCaptionProject(null);
     try {
       setStage('syncing');
       const sync = await syncFiles(video, audio);
@@ -123,6 +148,29 @@ export default function App() {
     }
   }
 
+  async function handleCaptionVideoSelected(video: File) {
+    setError(null);
+    setWorkflow('captions');
+    setSyncResult(null);
+    setAnalysis(null);
+    setPartitions([]);
+    setDownloadUrl(null);
+    try {
+      setStage('uploading');
+      const uploaded = await uploadCaptionVideo(video);
+      setCaptionProject(uploaded);
+
+      setStage('analyzing');
+      const captioned = await transcribeCaptionVideo(uploaded.session_id);
+      setCaptionProject(captioned);
+
+      setStage('editing');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setStage('idle');
+    }
+  }
+
   async function handleExport() {
     if (!syncResult) return;
     if (!keepPartitions(partitions).length) return;
@@ -131,7 +179,38 @@ export default function App() {
       setStage('exporting');
       setExportProgress(0);
       const result = await exportVideo(syncResult.session_id, partitions, setExportProgress);
-      setDownloadUrl(result.download_url);
+      setDownloadUrl(withCacheBust(result.download_url));
+      setStage('done');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setStage('editing');
+    }
+  }
+
+  async function handleCaptionSave() {
+    if (!captionProject) return;
+    setError(null);
+    try {
+      const saved = await saveCaptionProject(captionProject.session_id, captionProject.cues, captionProject.style);
+      setCaptionProject(saved);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function handleCaptionExport() {
+    if (!captionProject) return;
+    setError(null);
+    try {
+      setStage('exporting');
+      setExportProgress(0);
+      const result = await exportCaptionVideo(
+        captionProject.session_id,
+        captionProject.cues,
+        captionProject.style,
+        setExportProgress,
+      );
+      setDownloadUrl(withCacheBust(result.download_url));
       setStage('done');
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -141,9 +220,11 @@ export default function App() {
 
   function handleReset() {
     setStage('idle');
+    setWorkflow('captions');
     setSyncResult(null);
     setAnalysis(null);
     setPartitions([]);
+    setCaptionProject(null);
     setDownloadUrl(null);
     setError(null);
     setCurrentTime(0);
@@ -170,9 +251,23 @@ export default function App() {
   function handleResume(info: SessionInfo) {
     if (!info.analysis) return;
     setError(null);
+    setWorkflow('sync');
+    setCaptionProject(null);
     setSyncResult(info.sync);
     setAnalysis(info.analysis);
     setPartitions(info.analysis.partitions);
+    setDownloadUrl(null);
+    setCurrentTime(0);
+    setStage('editing');
+  }
+
+  function handleCaptionResume(project: CaptionProject) {
+    setError(null);
+    setWorkflow('captions');
+    setSyncResult(null);
+    setAnalysis(null);
+    setPartitions([]);
+    setCaptionProject(project);
     setDownloadUrl(null);
     setCurrentTime(0);
     setStage('editing');
@@ -182,10 +277,10 @@ export default function App() {
     <div className="app">
       <header className="app-header">
         <h1>AV Syncer</h1>
-        <StageIndicator stage={stage} />
-        {stage !== 'idle' && stage !== 'syncing' && stage !== 'analyzing' && (
+        <StageIndicator stage={stage} workflow={workflow} />
+        {stage !== 'idle' && stage !== 'uploading' && stage !== 'syncing' && stage !== 'analyzing' && (
           <>
-            <button className="btn-ghost" onClick={handleReanalyze}>Re-analyze</button>
+            {workflow === 'sync' && <button className="btn-ghost" onClick={handleReanalyze}>Re-analyze</button>}
             <button className="btn-ghost" onClick={handleReset}>Start Over</button>
           </>
         )}
@@ -201,22 +296,65 @@ export default function App() {
       <main className="app-main">
         {(stage === 'idle') && (
           <>
-            <FileUpload onFilesSelected={handleFilesSelected} />
-            <SessionPicker onResume={handleResume} />
+            <div className="workflow-tabs" role="tablist" aria-label="Workflow">
+              <button
+                className={workflow === 'captions' ? 'active' : ''}
+                onClick={() => setWorkflow('captions')}
+              >
+                Auto Captions
+              </button>
+              <button
+                className={workflow === 'sync' ? 'active' : ''}
+                onClick={() => setWorkflow('sync')}
+              >
+                Sync Audio/Video
+              </button>
+            </div>
+            {workflow === 'captions' ? (
+              <>
+                <CaptionUpload onVideoSelected={handleCaptionVideoSelected} />
+                <CaptionSessionPicker onResume={handleCaptionResume} />
+              </>
+            ) : (
+              <>
+                <FileUpload onFilesSelected={handleFilesSelected} />
+                <SessionPicker onResume={handleResume} />
+              </>
+            )}
           </>
         )}
 
-        {(stage === 'syncing' || stage === 'analyzing') && (
+        {(stage === 'uploading' || stage === 'syncing' || stage === 'analyzing') && (
           <div className="loading-panel">
             <div className="spinner" />
-            <p>{stage === 'syncing' ? 'Syncing audio to video...' : 'Detecting bad takes (Whisper transcribing)...'}</p>
+            <p>{loadingMessage(stage, workflow)}</p>
             {stage === 'analyzing' && (
-              <p className="hint">This may take a minute — the Whisper medium model is transcribing your audio.</p>
+              <p className="hint">
+                {workflow === 'captions'
+                  ? 'This may take a minute while the audio is transcribed with word timestamps.'
+                  : 'This may take a minute while the transcript is built and reviewed for retakes.'}
+              </p>
             )}
           </div>
         )}
 
-        {(stage === 'editing' || stage === 'exporting' || stage === 'done') && syncResult && analysis && (
+        {(stage === 'editing' || stage === 'exporting' || stage === 'done') && workflow === 'captions' && captionProject && (
+          <CaptionEditor
+            project={captionProject}
+            stage={stage}
+            downloadUrl={downloadUrl}
+            exportProgress={exportProgress}
+            onProjectChange={(next) => {
+              setCaptionProject(next);
+              setDownloadUrl(null);
+              if (stage === 'done') setStage('editing');
+            }}
+            onSave={handleCaptionSave}
+            onExport={handleCaptionExport}
+          />
+        )}
+
+        {(stage === 'editing' || stage === 'exporting' || stage === 'done') && workflow === 'sync' && syncResult && analysis && (
           <div className="editor-layout">
             <div className="editor-left">
               <VideoPreview
@@ -254,6 +392,11 @@ export default function App() {
   );
 }
 
+function withCacheBust(url: string): string {
+  const separator = url.includes('?') ? '&' : '?';
+  return `${url}${separator}v=${Date.now()}`;
+}
+
 const STAGE_LABELS: Record<AppStage, string> = {
   idle: 'Upload',
   uploading: 'Uploading',
@@ -263,7 +406,15 @@ const STAGE_LABELS: Record<AppStage, string> = {
   exporting: 'Exporting',
   done: 'Done',
 };
-const VISIBLE_STAGES: AppStage[] = ['idle', 'syncing', 'analyzing', 'editing', 'exporting', 'done'];
+const SYNC_STAGES: AppStage[] = ['idle', 'syncing', 'analyzing', 'editing', 'exporting', 'done'];
+const CAPTION_STAGES: AppStage[] = ['idle', 'uploading', 'analyzing', 'editing', 'exporting', 'done'];
+
+function loadingMessage(stage: AppStage, workflow: WorkflowMode): string {
+  if (stage === 'uploading') return 'Uploading video...';
+  if (stage === 'syncing') return 'Syncing audio to video...';
+  if (workflow === 'captions') return 'Transcribing audio for captions...';
+  return 'Detecting good takes...';
+}
 
 function SessionPicker({ onResume }: { onResume: (s: SessionInfo) => void }) {
   const [items, setItems] = useState<SessionInfo[] | null>(null);
@@ -302,6 +453,43 @@ function SessionPicker({ onResume }: { onResume: (s: SessionInfo) => void }) {
   );
 }
 
+function CaptionSessionPicker({ onResume }: { onResume: (s: CaptionProject) => void }) {
+  const [items, setItems] = useState<CaptionProject[] | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    listCaptionSessions()
+      .then(data => { if (!cancelled) setItems(data); })
+      .catch(e => { if (!cancelled) setErr(e instanceof Error ? e.message : String(e)); });
+    return () => { cancelled = true; };
+  }, []);
+
+  if (err) return <div className="session-picker error">Could not load caption sessions: {err}</div>;
+  if (!items) return null;
+  const resumable = items.filter(i => i.cues.length > 0);
+  if (!resumable.length) return null;
+
+  return (
+    <div className="session-picker">
+      <h3>Resume a caption session</h3>
+      <ul className="session-list">
+        {resumable.map(s => (
+          <li key={s.session_id} className="session-row">
+            <div className="session-meta">
+              <div className="session-when">{formatDate(s.created_at)}</div>
+              <div className="session-sub">
+                {s.duration.toFixed(1)}s · {s.cues.length} caption cues · <code>{s.session_id.slice(0, 8)}</code>
+              </div>
+            </div>
+            <button className="btn-secondary" onClick={() => onResume(s)}>Resume</button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function sessionPartitionLabel(partitions: Partition[] | undefined): string {
   if (!partitions) return '0 partitions';
   const total = partitions.length;
@@ -316,15 +504,16 @@ function formatDate(iso: string): string {
   return d.toLocaleString();
 }
 
-function StageIndicator({ stage }: { stage: AppStage }) {
-  const currentIdx = VISIBLE_STAGES.indexOf(stage);
+function StageIndicator({ stage, workflow }: { stage: AppStage; workflow: WorkflowMode }) {
+  const visibleStages = workflow === 'captions' ? CAPTION_STAGES : SYNC_STAGES;
+  const currentIdx = visibleStages.indexOf(stage);
   return (
     <div className="stage-indicator">
-      {VISIBLE_STAGES.map((s, i) => (
+      {visibleStages.map((s, i) => (
         <div key={s} className={`stage-step ${i <= currentIdx ? 'active' : ''} ${s === stage ? 'current' : ''}`}>
           <div className="stage-dot">{i + 1}</div>
           <span>{STAGE_LABELS[s]}</span>
-          {i < VISIBLE_STAGES.length - 1 && <div className="stage-line" />}
+          {i < visibleStages.length - 1 && <div className="stage-line" />}
         </div>
       ))}
     </div>

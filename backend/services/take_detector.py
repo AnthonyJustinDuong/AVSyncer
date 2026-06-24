@@ -1,4 +1,5 @@
 """Bad take detection using word-level Whisper transcription + phrase-retake splitting."""
+import json
 import os
 import re
 import sys
@@ -26,6 +27,8 @@ INLINE_RETAKE_MAX_WORDS = 6     # we only scan phrases up to this length
 INLINE_RETAKE_SIMILARITY = 0.80
 RETAKE_WINDOW = 100             # how many subsequent chunks the whole-chunk dedupe checks
 DEDUPE_MIN_WORDS = 3            # below this word count, fall back to aborted-prefix only
+LLM_TAKE_DETECTOR_MODEL = os.environ.get("TAKE_DETECTOR_LLM_MODEL", "gpt-5.4")
+LLM_REASONING_EFFORT = os.environ.get("TAKE_DETECTOR_LLM_REASONING_EFFORT", "high")
 
 
 # Load model once (downloads on first use, ~1.5GB for medium)
@@ -265,6 +268,286 @@ def decide_partitions(
 
     # Fill the timeline so every second of [0, total_duration) is covered by
     # exactly one partition. Gaps get their own singleton "keep" partitions.
+    return _fill_gaps(chunk_partitions, total_duration)
+
+
+def decide_partitions_llm(
+    words: list[dict],
+    total_duration: float,
+    model: str = LLM_TAKE_DETECTOR_MODEL,
+) -> list[Partition]:
+    """
+    Ask a reasoning model to identify retake groups from the full timestamped
+    word transcript. The model returns word-index spans for repeated/aborted
+    takes only; ungrouped transcript regions are treated as one-shot keepers.
+
+    Good take policy is intentionally simple: within every retake group, the
+    chronologically last valid take is kept and earlier takes are cut.
+    """
+    total_duration = max(0.0, float(total_duration))
+    if not words:
+        if total_duration <= 0:
+            return []
+        return [_gap_partition(0.0, total_duration)]
+    if not os.environ.get("OPENAI_API_KEY"):
+        raise RuntimeError("OPENAI_API_KEY is required for LLM take detection")
+
+    transcript = _format_words_for_llm(words)
+    _log(f"requesting LLM take detection from {model} "
+         f"({len(words)} words, reasoning={LLM_REASONING_EFFORT})")
+    t0 = time.time()
+    raw = _call_take_detector_llm(model, total_duration, transcript)
+    _log(f"LLM take detection returned in {time.time() - t0:.1f}s")
+
+    retake_groups = _parse_llm_retake_groups(raw, len(words))
+    if retake_groups:
+        _log(f"LLM identified {len(retake_groups)} retake groups")
+    else:
+        _log("LLM identified no retake groups; keeping all one-shot speech")
+    return _partitions_from_llm_retake_groups(words, total_duration, retake_groups)
+
+
+def _format_words_for_llm(words: list[dict]) -> str:
+    lines = []
+    for i, w in enumerate(words):
+        text = str(w.get("text") or "").strip()
+        lines.append(f"{i}: {float(w['start']):.3f}-{float(w['end']):.3f} {text}")
+    return "\n".join(lines)
+
+
+def _take_detector_json_schema() -> dict:
+    take_span = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "start_word": {
+                "type": "integer",
+                "description": "Inclusive index of the first word in this take.",
+            },
+            "end_word": {
+                "type": "integer",
+                "description": "Exclusive index immediately after the final word in this take.",
+            },
+            "notes": {
+                "type": "string",
+                "description": "Short reason this span is part of the retake group.",
+            },
+        },
+        "required": ["start_word", "end_word", "notes"],
+    }
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "retake_groups": {
+                "type": "array",
+                "description": (
+                    "Only repeated, restarted, or abandoned attempts. Do not include "
+                    "normal one-shot transcript sections."
+                ),
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "summary": {
+                            "type": "string",
+                            "description": "Brief description of the repeated content.",
+                        },
+                        "takes": {
+                            "type": "array",
+                            "description": (
+                                "All attempts in chronological order. The backend will keep "
+                                "the last valid take and cut the earlier ones."
+                            ),
+                            "minItems": 2,
+                            "items": take_span,
+                        },
+                    },
+                    "required": ["summary", "takes"],
+                },
+            },
+        },
+        "required": ["retake_groups"],
+    }
+
+
+def _call_take_detector_llm(model: str, total_duration: float, transcript: str) -> str:
+    from openai import OpenAI
+
+    client = OpenAI()
+    schema = _take_detector_json_schema()
+    system_prompt = (
+        "You are an expert video editor finding bad takes in a timestamped transcript. "
+        "A bad take is an earlier attempt that is repeated, restarted, abandoned, or "
+        "corrected by a later version of substantially the same line. The good take is "
+        "always the last valid version in chronological order. Transcript content that "
+        "is only said once is a one-shot keeper and must not be included in retake_groups. "
+        "Use word indices exactly as provided. Spans are [start_word, end_word), where "
+        "end_word is exclusive. Include immediate correction chatter or abandoned words "
+        "with the failed take when they should be cut before the successful version. "
+        "Prefer under-grouping if repetition is ambiguous or intentional."
+    )
+    user_prompt = (
+        f"Media duration: {total_duration:.3f} seconds\n\n"
+        "Return retake groups from this full timestamped word transcript:\n\n"
+        f"{transcript}"
+    )
+    inputs = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+    text_format = {
+        "format": {
+            "type": "json_schema",
+            "name": "take_detection",
+            "strict": True,
+            "schema": schema,
+        },
+    }
+
+    if hasattr(client, "responses"):
+        response = client.responses.create(
+            model=model,
+            input=inputs,
+            reasoning={"effort": LLM_REASONING_EFFORT},
+            text=text_format,
+        )
+        return _extract_response_text(response)
+
+    # Compatibility fallback for older OpenAI SDKs. This keeps the app usable,
+    # but upgrading the SDK is preferred because Responses supports reasoning.
+    _log("OpenAI SDK has no Responses API; falling back to Chat Completions")
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=inputs,
+            reasoning_effort=LLM_REASONING_EFFORT,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "take_detection",
+                    "strict": True,
+                    "schema": schema,
+                },
+            },
+        )
+    except TypeError:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                inputs[0],
+                {
+                    "role": "user",
+                    "content": (
+                        user_prompt
+                        + "\n\nReturn only valid JSON matching this schema:\n"
+                        + json.dumps(schema)
+                    ),
+                },
+            ],
+            response_format={"type": "json_object"},
+        )
+    return response.choices[0].message.content or "{}"
+
+
+def _extract_response_text(response) -> str:
+    output_text = getattr(response, "output_text", None)
+    if output_text:
+        return output_text
+
+    parts: list[str] = []
+    for item in getattr(response, "output", []) or []:
+        for content in getattr(item, "content", []) or []:
+            text = getattr(content, "text", None)
+            if text:
+                parts.append(text)
+    if parts:
+        return "\n".join(parts)
+    raise RuntimeError("OpenAI response did not include text output")
+
+
+def _parse_llm_retake_groups(raw: str, word_count: int) -> list[list[tuple[int, int]]]:
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"LLM take detection returned invalid JSON: {e}") from e
+
+    groups: list[list[tuple[int, int]]] = []
+    occupied: list[tuple[int, int]] = []
+    for group in data.get("retake_groups") or []:
+        spans: list[tuple[int, int]] = []
+        for take in group.get("takes") or []:
+            try:
+                start = int(take["start_word"])
+                end = int(take["end_word"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if start < 0 or end > word_count or start >= end:
+                continue
+            spans.append((start, end))
+        spans = sorted(set(spans))
+        if len(spans) < 2:
+            continue
+        if any(spans[i][1] > spans[i + 1][0] for i in range(len(spans) - 1)):
+            continue
+        if any(_spans_overlap(span, used) for span in spans for used in occupied):
+            continue
+        groups.append(spans)
+        occupied.extend(spans)
+    return groups
+
+
+def _spans_overlap(a: tuple[int, int], b: tuple[int, int]) -> bool:
+    return a[0] < b[1] and b[0] < a[1]
+
+
+def _partitions_from_llm_retake_groups(
+    words: list[dict],
+    total_duration: float,
+    retake_groups: list[list[tuple[int, int]]],
+) -> list[Partition]:
+    chunk_partitions: list[Partition] = []
+    covered = [False] * len(words)
+
+    for spans in retake_groups:
+        spans.sort(key=lambda s: words[s[0]]["start"])
+        group_id = str(uuid.uuid4())
+        for take_idx, (start_i, end_i) in enumerate(spans):
+            sub = words[start_i:end_i]
+            for i in range(start_i, end_i):
+                covered[i] = True
+            chunk_partitions.append(Partition(
+                id=str(uuid.uuid4()),
+                start=float(sub[0]["start"]),
+                end=float(sub[-1]["end"]),
+                text=" ".join(str(w.get("text") or "").strip() for w in sub).strip(),
+                group_id=group_id,
+                take_index=take_idx,
+                keep=(take_idx == len(spans) - 1),
+            ))
+
+    cursor = 0
+    n = len(words)
+    while cursor < n:
+        while cursor < n and covered[cursor]:
+            cursor += 1
+        start = cursor
+        while cursor < n and not covered[cursor]:
+            cursor += 1
+        if start == cursor:
+            continue
+        for chunk in _merge_words(words[start:cursor], min_len=0.0):
+            chunk_partitions.append(Partition(
+                id=str(uuid.uuid4()),
+                start=float(chunk["start"]),
+                end=float(chunk["end"]),
+                text=chunk["text"].strip(),
+                group_id=str(uuid.uuid4()),
+                take_index=0,
+                keep=True,
+            ))
+
+    chunk_partitions.sort(key=lambda p: p.start)
     return _fill_gaps(chunk_partitions, total_duration)
 
 

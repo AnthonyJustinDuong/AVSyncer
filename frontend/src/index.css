@@ -53,6 +53,33 @@ body {
   padding: 24px;
 }
 
+.workflow-tabs {
+  width: fit-content;
+  max-width: 100%;
+  display: flex;
+  gap: 4px;
+  margin: 0 auto 18px;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.workflow-tabs button {
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-dim);
+  padding: 8px 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.workflow-tabs button.active {
+  background: var(--accent);
+  color: #fff;
+}
+
 /* ── Stage indicator ── */
 .stage-indicator {
   display: flex;
@@ -268,6 +295,11 @@ body {
   display: flex;
   gap: 20px;
   width: 100%;
+}
+
+.upload-row-single {
+  max-width: 360px;
+  justify-content: center;
 }
 
 .drop-zone {
