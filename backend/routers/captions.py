@@ -32,14 +32,11 @@ from services.take_detector import transcribe
 router = APIRouter()
 
 UPLOADS_DIR = os.path.join(os.path.dirname(__file__), "..", "uploads")
-MAX_CUE_WORDS = 6
-MAX_CUE_DURATION = 4.0
-MAX_WORD_GAP = 0.9
 MIN_CAPTION_MAX_WIDTH = 0.12
 MAX_CAPTION_MAX_WIDTH = 0.96
 PREVIEW_EDGE_INSET = 0.02
-CAPTION_SPLIT_LLM_MODEL = os.environ.get("CAPTION_SPLIT_LLM_MODEL", "gpt-5.4")
-CAPTION_SPLIT_LLM_REASONING_EFFORT = os.environ.get("CAPTION_SPLIT_LLM_REASONING_EFFORT", "medium")
+CAPTION_SPLIT_LLM_MODEL = "gpt-5.4"
+CAPTION_SPLIT_LLM_REASONING_EFFORT = "medium"
 
 
 def _save_upload(upload: UploadFile, dest: str) -> None:
@@ -75,47 +72,7 @@ def _clean_words(raw_words: list[dict]) -> list[CaptionWord]:
 
 
 def _build_cues(words: list[CaptionWord]) -> list[CaptionCue]:
-    mode = (os.environ.get("CAPTION_SPLIT_MODE") or "").strip().lower()
-    if not mode:
-        mode = "llm" if os.environ.get("OPENAI_API_KEY") else "deterministic"
-    if mode == "llm":
-        try:
-            cues = _build_cues_llm(words)
-            if cues:
-                return cues
-        except Exception as e:
-            print(f"[captions] LLM cue split failed, using deterministic fallback: {e}", flush=True)
-    elif mode not in {"deterministic", "heuristic"}:
-        print(f"[captions] unknown CAPTION_SPLIT_MODE={mode}; using deterministic fallback", flush=True)
-    return _build_cues_deterministic(words)
-
-
-def _build_cues_deterministic(words: list[CaptionWord]) -> list[CaptionCue]:
-    cues: list[CaptionCue] = []
-    current: list[CaptionWord] = []
-
-    def flush() -> None:
-        nonlocal current
-        if not current:
-            return
-        cues.append(CaptionCue(
-            id=str(uuid.uuid4()),
-            start=current[0].start,
-            end=current[-1].end,
-            words=current,
-        ))
-        current = []
-
-    for word in words:
-        if current:
-            gap = word.start - current[-1].end
-            duration = word.end - current[0].start
-            ended_sentence = _ends_sentence(current[-1].text)
-            if gap > MAX_WORD_GAP or ended_sentence or duration > MAX_CUE_DURATION or len(current) >= MAX_CUE_WORDS:
-                flush()
-        current.append(word)
-    flush()
-    return cues
+    return _build_cues_llm(words)
 
 
 def _build_cues_from_spans(words: list[CaptionWord], spans: list[tuple[int, int]]) -> list[CaptionCue]:
@@ -137,7 +94,7 @@ def _build_cues_llm(words: list[CaptionWord]) -> list[CaptionCue]:
     if not words:
         return []
     if not os.environ.get("OPENAI_API_KEY"):
-        return []
+        raise RuntimeError("OPENAI_API_KEY is required for caption cue splitting")
     raw = _call_caption_split_llm(words)
     spans = _parse_caption_spans(raw, len(words))
     return _build_cues_from_spans(words, spans)
@@ -297,10 +254,6 @@ def _parse_caption_spans(raw: str, word_count: int) -> list[tuple[int, int]]:
     if cursor != word_count:
         raise RuntimeError("caption split did not cover every word")
     return spans
-
-
-def _ends_sentence(text: str) -> bool:
-    return text.rstrip().endswith((".", "?", "!"))
 
 
 def _normalize_style(style: CaptionStyle) -> CaptionStyle:

@@ -357,10 +357,6 @@ def _font_line_metrics(draw, font) -> FontLineMetrics:
 
 
 def _caption_font_path() -> str:
-    env_path = os.environ.get("CAPTION_FONT_PATH")
-    if env_path and os.path.exists(env_path):
-        return env_path
-
     bundled = os.path.join(os.path.dirname(__file__), "..", "assets", "fonts", "Poppins-ExtraBold.ttf")
     candidates: list[str] = [os.path.abspath(bundled)]
     for base in ("~/Library/Fonts", "/Library/Fonts", "/System/Library/Fonts", "/System/Library/Fonts/Supplemental"):
@@ -377,7 +373,7 @@ def _caption_font_path() -> str:
     for path in candidates:
         if os.path.exists(path):
             return path
-    raise RuntimeError("No usable caption font found. Set CAPTION_FONT_PATH to a .ttf or .ttc font file.")
+    raise RuntimeError("No usable caption font found.")
 
 
 def _caption_stroke_width(style: CaptionStyle) -> int:
